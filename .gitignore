@@ -1,9 +1,8 @@
 # ─── Datos (no versionar: pesados y reproducibles desde GDELT) ───
 
 # ficheros crudos de GDELT en la raíz
-*.export.CSV
 *.export.CSV.zip
-*.npy
+
 
 # ─── Documentos privados / entrega (datos personales, bitácora) ───
 Entrega1_TFM_*.pdf
