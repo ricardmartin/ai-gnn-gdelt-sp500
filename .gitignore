@@ -1,7 +1,14 @@
 # ─── Datos (no versionar: pesados y reproducibles desde GDELT) ───
 
-# ficheros crudos de GDELT en la raíz
+# ficheros crudos de GDELT (zip y CSV extraídos)
 *.export.CSV.zip
+*.export.CSV
+data/raw/*.export.CSV
+
+# artefactos derivados (reproducibles desde el pipeline)
+data/*.npy
+data/*.pkl
+data/sp500.csv
 
 
 # ─── Documentos privados / entrega (datos personales, bitácora) ───
