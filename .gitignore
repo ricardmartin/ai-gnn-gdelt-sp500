@@ -1,0 +1,41 @@
+# ─── Datos (no versionar: pesados y reproducibles desde GDELT) ───
+# CSVs diarios descargados de GDELT
+data/raw/
+# embeddings cacheados (~34 MB c/u)
+data/embeddings_*.npy
+# ficheros crudos de GDELT en la raíz
+*.export.CSV
+*.export.CSV.zip
+*.npy
+
+# ─── Documentos privados / entrega (datos personales, bitácora) ───
+Entrega1_TFM_*.pdf
+acta_decisiones_tfm.md
+
+# ─── Jupyter ───
+.ipynb_checkpoints/
+
+# ─── Builders temporales ───
+_build_nb.py
+_fix_listings.py
+
+# ─── Python ───
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.python-version
+
+# ─── Entornos / editores ───
+.env
+.vscode/
+.idea/
+.claude/
+
+# ─── Sistema operativo ───
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
