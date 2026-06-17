@@ -1,8 +1,5 @@
 # ─── Datos (no versionar: pesados y reproducibles desde GDELT) ───
-# CSVs diarios descargados de GDELT
-data/raw/
-# embeddings cacheados (~34 MB c/u)
-data/embeddings_*.npy
+
 # ficheros crudos de GDELT en la raíz
 *.export.CSV
 *.export.CSV.zip
