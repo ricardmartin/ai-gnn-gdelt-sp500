@@ -39,7 +39,6 @@ for d in (DIR_RAW, DIR_PROCESSED, DIR_CHECKPOINTS):
 # ---------------------------------------------------------------------------
 
 # AJUSTAR: rango de fechas final tras decidir el periodo de entrenamiento.
-# Por defecto se usa una ventana de 10 años, que es lo discutido en el TFM.
 FECHA_INICIO = "2015-01-01"
 FECHA_FIN = "2025-01-01"
 
@@ -62,6 +61,29 @@ MODO_ETIQUETA = "sigma"
 # AJUSTAR: cuando se conozca la distribución real de retornos.
 UMBRAL_NEUTRO = 0.005  # 0.5 %, solo usado si MODO_ETIQUETA="fijo"
 UMBRAL_SIGMA = 0.5     # solo usado si MODO_ETIQUETA="sigma"
+
+
+# ---------------------------------------------------------------------------
+# Simulación financiera
+# ---------------------------------------------------------------------------
+
+# Lógica de la estrategia:
+#   - Predice "sube"   -> invertido en SP500 (mantiene si ya estaba dentro).
+#   - Predice "neutro" -> mantiene la posición anterior (no hace nada).
+#   - Predice "baja"   -> sale al cash (vende si estaba dentro).
+#   - Si además P(baja) >= UMBRAL_SHORT -> entra en short (apuesta a la baja).
+#
+# Solo se aplica un umbral de confianza para activar el short, porque shortear
+# tiene más riesgo y conviene exigir certeza alta. El resto de la lógica se
+# decide únicamente por la clase predicha (argmax).
+UMBRAL_SHORT = 0.70
+
+# Tasa libre de riesgo anual usada para calcular el Sharpe ratio.
+# 0.0 significa que toda la rentabilidad cuenta como exceso. Valores típicos:
+#   0.00  -> simplificación habitual en estudios académicos
+#   0.02  -> ~rentabilidad bonos Tesoro USA 10Y en periodos normales
+#   0.04  -> ~rentabilidad bonos Tesoro USA 10Y en 2023-2024
+TASA_LIBRE_RIESGO_ANUAL = 0.0
 
 
 # ---------------------------------------------------------------------------

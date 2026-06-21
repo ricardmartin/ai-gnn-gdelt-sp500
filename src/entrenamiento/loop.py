@@ -1,33 +1,37 @@
 """
 Bucle de entrenamiento de la HGNN.
 
-Para cada fold del walk-forward, entrena el modelo sobre el train del fold y
-lo evalúa sobre el val. Soporta multi-seed para reportar varianza.
+Para cada fold del walk-forward:
+    - Entrena el modelo sobre el train del fold.
+    - Lo evalúa sobre el val: clasificación + simulación financiera.
+    - Reporta métricas por seed y agrega.
 
 Implementa:
     - Cross-entropy con pesos opcionales por clase.
     - Optimizador AdamW con weight decay.
     - Early stopping por F1 macro de validación.
-    - Checkpointing del mejor modelo de cada fold.
+    - Simulación de la estrategia de inversión sobre el set de validación.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.optim import AdamW
 from torch_geometric.loader import DataLoader
 
 from src.modelo.arquitectura import HGNNGeopolitica
 from src.entrenamiento.evaluacion import (
-    Metricas, calcular_metricas, ResultadoExperimento,
+    Metricas, MetricasFinancieras,
+    calcular_metricas, simular_estrategia,
+    ResultadoExperimento,
 )
 from src.utils.logging import obtener_logger
-from config import ENTRENAMIENTO, MODELO, DIR_CHECKPOINTS
+from config import ENTRENAMIENTO, MODELO, UMBRAL_SHORT
 
 log = obtener_logger(__name__)
 
@@ -43,15 +47,49 @@ def fijar_semilla(seed: int) -> None:
 
 
 def pesos_de_clase(y_train: np.ndarray, num_clases: int = 3) -> torch.Tensor:
-    """
-    Calcula pesos de clase inversamente proporcionales a la frecuencia.
-
-    Útil para evitar que el modelo se sesgue hacia la clase mayoritaria.
-    """
+    """Pesos de clase inversos a la frecuencia (para CE ponderada)."""
     counts = np.bincount(y_train, minlength=num_clases).astype(np.float32)
     counts = np.where(counts > 0, counts, 1.0)
     pesos = counts.sum() / (num_clases * counts)
     return torch.tensor(pesos, dtype=torch.float32)
+
+
+def _predecir(
+    modelo: HGNNGeopolitica,
+    loader,
+    dispositivo: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Pasa el loader entero por el modelo y devuelve (probas, preds, reales).
+
+    - probas: shape (n, 3) con las probabilidades softmax por clase.
+    - preds:  shape (n,)  con la clase argmax.
+    - reales: shape (n,)  con la etiqueta verdadera.
+    """
+    modelo.eval()
+    probas_list, preds_list, reales_list = [], [], []
+    with torch.no_grad():
+        for batch in loader:
+            batch = batch.to(dispositivo)
+            logits = modelo(batch)
+            probas = F.softmax(logits, dim=-1).cpu().numpy()
+            preds = logits.argmax(dim=-1).cpu().numpy()
+            reales = batch["market"].y.cpu().numpy()
+            probas_list.append(probas)
+            preds_list.append(preds)
+            reales_list.append(reales)
+
+    if not preds_list:
+        return (
+            np.empty((0, 3), dtype=np.float32),
+            np.array([], dtype=np.int64),
+            np.array([], dtype=np.int64),
+        )
+    return (
+        np.concatenate(probas_list, axis=0),
+        np.concatenate(preds_list, axis=0),
+        np.concatenate(reales_list, axis=0),
+    )
 
 
 def entrenar_un_fold(
@@ -61,27 +99,31 @@ def entrenar_un_fold(
     seed: int = 0,
     dispositivo: str = "cpu",
     verbose: bool = True,
-) -> tuple[Metricas, dict]:
+    retornos_val: Optional[np.ndarray] = None,
+    umbral_short: float = UMBRAL_SHORT,
+) -> tuple[Metricas, dict, Optional[MetricasFinancieras]]:
     """
-    Entrena el modelo sobre un fold y devuelve las métricas finales en val.
+    Entrena el modelo sobre un fold y evalúa en validación.
 
     Args:
-        dataset: instancia de DatasetGrafoDiario.
-        idx_train: índices de muestras de train dentro del dataset.
-        idx_val: índices de muestras de validación.
-        seed: semilla aleatoria.
+        dataset: DatasetGrafoDiario.
+        idx_train: índices de train.
+        idx_val: índices de validación.
+        seed: semilla.
         dispositivo: 'cpu' o 'cuda'.
-        verbose: si True, imprime progreso por epoch.
+        verbose: imprime progreso por epoch.
+        retornos_val: array de retornos reales (close-to-close) del set de
+            validación, alineado con idx_val. Si se proporciona, se ejecuta
+            la simulación financiera.
+        umbral_short: umbral de P(baja) para activar short.
 
     Returns:
-        Tupla (metricas_val, historial) donde historial es un dict con
-        las curvas de pérdida y métrica por epoch.
+        (metricas_clasificacion, historial, metricas_financieras_o_None).
     """
     fijar_semilla(seed)
 
-    # --- Construir subdatasets de train y val ----------------------------------
-    grafos_train = []
-    y_train = []
+    # --- Construir subdatasets ----------------------------------------------
+    grafos_train, y_train = [], []
     for i in idx_train:
         g, c = dataset[int(i)]
         grafos_train.append(g)
@@ -89,14 +131,10 @@ def entrenar_un_fold(
     y_train_arr = np.asarray(y_train, dtype=np.int64)
 
     grafos_val = []
-    y_val = []
     for i in idx_val:
-        g, c = dataset[int(i)]
+        g, _ = dataset[int(i)]
         grafos_val.append(g)
-        y_val.append(c)
-    y_val_arr = np.asarray(y_val, dtype=np.int64)
 
-    # --- DataLoaders ----------------------------------------------------------
     loader_train = DataLoader(
         grafos_train, batch_size=ENTRENAMIENTO.batch_size, shuffle=True,
     )
@@ -104,7 +142,7 @@ def entrenar_un_fold(
         grafos_val, batch_size=ENTRENAMIENTO.batch_size, shuffle=False,
     )
 
-    # --- Modelo ----------------------------------------------------------------
+    # --- Modelo --------------------------------------------------------------
     modelo = HGNNGeopolitica().to(dispositivo)
     optimizador = AdamW(
         modelo.parameters(),
@@ -118,17 +156,16 @@ def entrenar_un_fold(
     else:
         criterio = nn.CrossEntropyLoss()
 
-    # --- Bucle con early stopping ---------------------------------------------
+    # --- Bucle con early stopping -------------------------------------------
     historial = {"train_loss": [], "val_f1": [], "val_acc": []}
     mejor_f1 = -np.inf
     epochs_sin_mejora = 0
     mejor_estado: Optional[dict] = None
 
     for epoch in range(ENTRENAMIENTO.epochs_max):
-        # ---- Train ----
+        # Train
         modelo.train()
-        loss_acc = 0.0
-        n_batches = 0
+        loss_acc, n_batches = 0.0, 0
         for batch in loader_train:
             batch = batch.to(dispositivo)
             optimizador.zero_grad()
@@ -141,18 +178,8 @@ def entrenar_un_fold(
             n_batches += 1
         train_loss = loss_acc / max(1, n_batches)
 
-        # ---- Val ----
-        modelo.eval()
-        preds, reales = [], []
-        with torch.no_grad():
-            for batch in loader_val:
-                batch = batch.to(dispositivo)
-                logits = modelo(batch)
-                p = logits.argmax(dim=-1).cpu().numpy()
-                preds.append(p)
-                reales.append(batch["market"].y.cpu().numpy())
-        preds = np.concatenate(preds) if preds else np.array([], dtype=np.int64)
-        reales = np.concatenate(reales) if reales else np.array([], dtype=np.int64)
+        # Val
+        _, preds, reales = _predecir(modelo, loader_val, dispositivo)
         m = calcular_metricas(reales, preds)
 
         historial["train_loss"].append(train_loss)
@@ -165,34 +192,31 @@ def entrenar_un_fold(
                 epoch, train_loss, m.accuracy, m.f1_macro,
             )
 
-        # ---- Early stopping ----
+        # Early stopping
         if m.f1_macro > mejor_f1:
             mejor_f1 = m.f1_macro
-            mejor_estado = {k: v.detach().cpu().clone() for k, v in modelo.state_dict().items()}
+            mejor_estado = {k: v.detach().cpu().clone()
+                            for k, v in modelo.state_dict().items()}
             epochs_sin_mejora = 0
         else:
             epochs_sin_mejora += 1
             if epochs_sin_mejora >= ENTRENAMIENTO.paciencia_early_stopping:
-                log.info("  Early stopping en epoch %d (sin mejora desde %d epochs)",
-                         epoch, ENTRENAMIENTO.paciencia_early_stopping)
+                log.info("  Early stopping en epoch %d", epoch)
                 break
 
-    # Restaurar el mejor estado y evaluar una vez más.
+    # Restaurar el mejor estado y evaluación final.
     if mejor_estado is not None:
         modelo.load_state_dict(mejor_estado)
-    modelo.eval()
-    preds, reales = [], []
-    with torch.no_grad():
-        for batch in loader_val:
-            batch = batch.to(dispositivo)
-            logits = modelo(batch)
-            preds.append(logits.argmax(dim=-1).cpu().numpy())
-            reales.append(batch["market"].y.cpu().numpy())
-    preds = np.concatenate(preds) if preds else np.array([], dtype=np.int64)
-    reales = np.concatenate(reales) if reales else np.array([], dtype=np.int64)
+
+    probas, preds, reales = _predecir(modelo, loader_val, dispositivo)
     m_final = calcular_metricas(reales, preds)
 
-    return m_final, historial
+    # Simulación financiera si tenemos retornos reales.
+    metricas_fin: Optional[MetricasFinancieras] = None
+    if retornos_val is not None and len(retornos_val) == len(reales):
+        metricas_fin = simular_estrategia(probas, retornos_val, umbral_short)
+
+    return m_final, historial, metricas_fin
 
 
 def entrenar_walkforward(
@@ -200,18 +224,25 @@ def entrenar_walkforward(
     folds,
     semillas=ENTRENAMIENTO.semillas,
     dispositivo: str = "cpu",
+    retornos_por_indice: Optional[np.ndarray] = None,
+    umbral_short: float = UMBRAL_SHORT,
 ) -> ResultadoExperimento:
     """
-    Ejecuta el entrenamiento walk-forward completo, con multi-seed.
+    Walk-forward completo con multi-seed y simulación financiera.
 
     Args:
         dataset: DatasetGrafoDiario.
-        folds: lista de FoldTemporal devuelta por construir_folds().
-        semillas: iterable de semillas a usar.
+        folds: lista de FoldTemporal.
+        semillas: semillas a usar.
         dispositivo: 'cpu' o 'cuda'.
+        retornos_por_indice: array de longitud len(dataset) con el retorno
+            real (close-to-close) asociado a cada muestra del dataset, en el
+            mismo orden de índices que usa el dataset. Si se pasa, se ejecuta
+            la simulación financiera por fold.
+        umbral_short: umbral de P(baja) para activar short.
 
     Returns:
-        ResultadoExperimento con las métricas de cada (fold, semilla).
+        ResultadoExperimento con métricas de clasificación + financieras.
     """
     resultado = ResultadoExperimento()
 
@@ -221,14 +252,22 @@ def entrenar_walkforward(
                  fold.fold_id, len(fold.idx_train), len(fold.idx_val))
         log.info("=" * 70)
 
+        retornos_val_fold = None
+        if retornos_por_indice is not None:
+            retornos_val_fold = retornos_por_indice[fold.idx_val]
+
         for seed in semillas:
             log.info("--- Semilla %d ---", seed)
-            m, _hist = entrenar_un_fold(
+            m, _hist, mf = entrenar_un_fold(
                 dataset, fold.idx_train, fold.idx_val,
                 seed=seed, dispositivo=dispositivo, verbose=False,
+                retornos_val=retornos_val_fold,
+                umbral_short=umbral_short,
             )
-            log.info("  Resultado: %s", m.resumen())
-            resultado.agregar(m)
+            log.info("  Clasificación: %s", m.resumen())
+            if mf is not None:
+                log.info("  Financiero:    %s", mf.resumen())
+            resultado.agregar(m, mf)
 
     log.info("=" * 70)
     log.info("RESUMEN GLOBAL: %s", resultado.resumen_final())
