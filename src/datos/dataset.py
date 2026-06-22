@@ -48,6 +48,10 @@ class DatasetGrafoDiario:
             `agregar_participacion_por_dia_y_pais`), que incluye los eventos de
             un solo actor del filtro OR. Si se omite, las features de nodo se
             derivan de `eventos_agregados` y NO incluyen esos eventos.
+        cachear: si True, guarda en memoria cada grafo construido para
+            reutilizarlo. Por defecto False, porque en un walk-forward la caché
+            crece sin límite y agota la RAM. Solo conviene activarlo si todos
+            los grafos caben holgadamente en memoria.
     """
 
     def __init__(
@@ -59,6 +63,7 @@ class DatasetGrafoDiario:
         vix: Optional[pd.Series] = None,
         precomputar: bool = False,
         participacion: Optional[pd.DataFrame] = None,
+        cachear: bool = False,
     ) -> None:
         self.eventos_agregados = eventos_agregados
         self.etiquetas = etiquetas.reset_index(drop=True)
@@ -66,6 +71,8 @@ class DatasetGrafoDiario:
         self.macro = macro
         self.vix = vix
         self.participacion = participacion
+        # Si se precomputan los grafos, implícitamente se cachean.
+        self.cachear = cachear or precomputar
 
         # Caché en memoria, vacía o pre-llenada.
         self._cache: dict[int, HeteroData] = {}
@@ -95,13 +102,22 @@ class DatasetGrafoDiario:
             data = self._cache[idx]
         else:
             data = self._construir(idx)
-            # Caché lazy: guardamos solo si no agotamos memoria.
-            self._cache[idx] = data
+            # Solo se cachea si se ha pedido explícitamente. Por defecto NO se
+            # cachea: en un walk-forward la caché crecería sin límite (cada día
+            # de cada fold quedaría retenido), impidiendo liberar la RAM entre
+            # folds y agotando la memoria. Sin caché, el pico de memoria es el
+            # de un fold cada vez.
+            if self.cachear:
+                self._cache[idx] = data
 
         # Incrustamos la etiqueta dentro del HeteroData para que viaje en el batch.
         clase = int(self.etiquetas.iloc[idx]["clase"])
         data["market"].y = torch.tensor([clase], dtype=torch.long)
         return data, clase
+
+    def limpiar_cache(self) -> None:
+        """Vacía la caché de grafos (útil para liberar RAM entre fases)."""
+        self._cache.clear()
 
     def obtener_solo_grafos(self) -> list[HeteroData]:
         """Devuelve una lista con todos los HeteroData (sin la etiqueta como tupla)."""
