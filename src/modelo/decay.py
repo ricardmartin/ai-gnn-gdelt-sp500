@@ -27,9 +27,28 @@ import numpy as np
 import pandas as pd
 
 from src.utils.logging import obtener_logger
-from config import LAMBDA_DECAY, VENTANA_DECAY_DIAS
+from config import LAMBDA_DECAY, VENTANA_DECAY_DIAS, LAMBDA_MULTIPLICADORES_QUADCLASS
 
 log = obtener_logger(__name__)
+
+
+def lambda_para_quadclass(quadclass: str, lambda_base: float = LAMBDA_DECAY) -> float:
+    """
+    Devuelve la tasa de decaimiento λ ajustada para un tipo de evento concreto.
+
+    Los eventos de conflicto material (guerras, ataques) tienen memoria mas
+    larga (λ menor) que los de cooperacion verbal (declaraciones), que el
+    mercado descuenta rapidamente.
+
+    Args:
+        quadclass: codigo QuadClass CAMEO como string ("1", "2", "3" o "4").
+        lambda_base: tasa base desde config.py.
+
+    Returns:
+        λ efectivo para ese tipo de evento.
+    """
+    multiplicador = LAMBDA_MULTIPLICADORES_QUADCLASS.get(str(quadclass), 1.0)
+    return lambda_base * multiplicador
 
 
 def calcular_alpha(goldstein_abs: np.ndarray, num_mentions: np.ndarray) -> np.ndarray:
@@ -108,7 +127,14 @@ def aplicar_decay(
 
     # Distancia en días desde cada evento al día actual.
     dt = (fecha_corte - df["fecha"]).dt.days.astype(float).values
-    decay_factor = np.exp(-lambda_decay * dt)
+
+    # Lambda diferenciado por QuadClass: conflicto material decae mas lento
+    # (memoria mas larga) que cooperacion verbal (memoria mas corta).
+    lambdas = np.array([
+        lambda_para_quadclass(str(q), lambda_decay)
+        for q in df["quadclass"].values
+    ])
+    decay_factor = np.exp(-lambdas * dt)
 
     # Intensidad de cada evento agregado.
     alpha = calcular_alpha(
@@ -118,6 +144,7 @@ def aplicar_decay(
 
     df["contribucion_peso"] = alpha * decay_factor
     df["contribucion_tono"] = df["tono_medio"].values * decay_factor
+    df["decay_factor"] = decay_factor
 
     # Agregar por arista (origen, destino, tipo).
     agregado = df.groupby(
@@ -127,20 +154,15 @@ def aplicar_decay(
         peso_decay=("contribucion_peso", "sum"),
         intensidad_acumulada=("contribucion_peso", "sum"),
         tono_ponderado=("contribucion_tono", "sum"),
+        suma_decay_factors=("decay_factor", "sum"),
         n_eventos=("n_eventos", "sum"),
     ).reset_index()
 
-    # Normalizar tono ponderado dividiendo por la suma de pesos.
-    suma_factores = df.groupby(
-        ["pais_origen", "pais_destino", "quadclass"], observed=True
-    ).apply(lambda g: float(np.exp(-lambda_decay *
-                                   (fecha_corte - g["fecha"]).dt.days.values).sum()))
-    suma_factores = suma_factores.reset_index(name="suma_factores")
-    agregado = agregado.merge(
-        suma_factores, on=["pais_origen", "pais_destino", "quadclass"], how="left"
+    # Normalizar tono ponderado dividiendo por la suma de factores de decay.
+    agregado["tono_ponderado"] = (
+        agregado["tono_ponderado"] / agregado["suma_decay_factors"].clip(lower=1e-9)
     )
-    agregado["tono_ponderado"] = agregado["tono_ponderado"] / agregado["suma_factores"]
-    agregado = agregado.drop(columns=["suma_factores"])
+    agregado = agregado.drop(columns=["suma_decay_factors"])
 
     return agregado
 

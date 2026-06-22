@@ -6,7 +6,10 @@ un DataFrame de eventos relevantes listo para construir el grafo.
 
 Filtros aplicados:
 
-1. Se descartan filas que no involucran a dos países del ROSTER.
+1. Se descartan filas en las que NINGUNO de los dos actores pertenece al ROSTER
+   (filtro OR: basta con que Actor1 O Actor2 sea un país relevante).
+   Esto captura eventos como CHN→SYR donde China es el actor relevante aunque
+   Siria no esté en el roster.
 2. Se descartan eventos con cobertura mediática insuficiente (NumMentions bajo).
 3. Se descartan filas con valores faltantes en los campos críticos.
 
@@ -64,22 +67,32 @@ def cargar_csv_gdelt(ruta: Path) -> pd.DataFrame:
 
 def filtrar_roster(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Conserva solo eventos en los que tanto Actor1 como Actor2 pertenecen al
-    ROSTER de países definido en `src/utils/paises.py`.
+    Conserva eventos en los que AL MENOS UNO de los dos actores pertenece al
+    ROSTER de países definido en `src/utils/paises.py` (filtro OR).
+
+    Esto captura eventos donde un país del roster actúa sobre un tercero
+    irrelevante (p.ej. CHN→SYR) o donde un tercero actúa sobre un país del
+    roster (p.ej. SYR→CHN). Ambos aportan señal sobre CHN aunque SYR no
+    esté en el roster.
+
+    Cuando uno de los actores no está en el roster, su columna queda como NaN.
+    Las funciones de agregación y grafo manejan correctamente estos NaN
+    ignorando el extremo desconocido de la arista.
 
     Añade dos columnas auxiliares:
-        pais_origen  -> id del nodo de Actor1
-        pais_destino -> id del nodo de Actor2
+        pais_origen  -> id del nodo de Actor1 (NaN si no está en roster)
+        pais_destino -> id del nodo de Actor2 (NaN si no está en roster)
     """
     df = df.copy()
     df["pais_origen"] = df["Actor1CountryCode"].map(COD_A_PAIS)
     df["pais_destino"] = df["Actor2CountryCode"].map(COD_A_PAIS)
 
-    mask = df["pais_origen"].notna() & df["pais_destino"].notna()
+    # OR: basta con que al menos un actor sea del roster.
+    mask = df["pais_origen"].notna() | df["pais_destino"].notna()
     df_filt = df.loc[mask].copy()
 
     log.debug(
-        "Filtro roster: %d/%d eventos conservados (%.1f%%)",
+        "Filtro roster (OR): %d/%d eventos conservados (%.1f%%)",
         len(df_filt), len(df), 100.0 * len(df_filt) / max(1, len(df))
     )
     return df_filt
@@ -136,6 +149,13 @@ def agregar_eventos_por_dia_y_par(df_eventos: pd.DataFrame) -> pd.DataFrame:
     "arista resumen" entre dos países en un día concreto, con sus atributos
     agregados.
 
+    Tras el cambio a filtro OR, pais_origen o pais_destino pueden ser NaN
+    cuando solo uno de los actores está en el roster. En ese caso el evento
+    contribuye a las features del nodo conocido pero no genera una arista
+    país-país (se necesitan los dos extremos para eso). Estas filas se
+    descartan de la agregación de aristas pero se conservan para el cálculo
+    de features de nodo en grafo.py.
+
     Devuelve un DataFrame con columnas:
         fecha, pais_origen, pais_destino, quadclass,
         n_eventos, goldstein_medio, tono_medio, num_mentions_total
@@ -146,7 +166,13 @@ def agregar_eventos_por_dia_y_par(df_eventos: pd.DataFrame) -> pd.DataFrame:
     df = df_eventos.copy()
     df["quadclass"] = df["QuadClass"].astype(str)
 
-    grupos = df.groupby(
+    # Para las aristas necesitamos los dos extremos conocidos.
+    df_aristas = df.dropna(subset=["pais_origen", "pais_destino"])
+
+    if df_aristas.empty:
+        return pd.DataFrame()
+
+    grupos = df_aristas.groupby(
         ["fecha", "pais_origen", "pais_destino", "quadclass"],
         observed=True,
     )

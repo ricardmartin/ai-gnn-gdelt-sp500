@@ -105,13 +105,35 @@ TIPADO_ARISTAS = "quadclass"
 # Decay temporal (Hawkes)
 # ---------------------------------------------------------------------------
 
-# Tasa de decaimiento. λ alto ↔ memoria corta; λ bajo ↔ memoria larga.
+# Tasa de decaimiento base. λ alto ↔ memoria corta; λ bajo ↔ memoria larga.
 # La "vida media" en días es ln(2) / λ.
 #   λ = 0.0693 -> vida media de 10 días
 #   λ = 0.1386 -> vida media de 5 días
 #   λ = 0.0347 -> vida media de 20 días
 # AJUSTAR: barrido experimental.
 LAMBDA_DECAY = 0.0693  # vida media ≈ 10 días por defecto
+
+# Multiplicadores de decay por QuadClass (sobre LAMBDA_DECAY base).
+# Justificación: los eventos conflictivos tienen efectos más duraderos en el
+# mercado que los cooperativos. Una guerra no "desaparece" en 10 días; una
+# declaración diplomática sí. Esto conecta directamente con las tres fases del
+# riesgo geopolítico (amenaza, realización, escalada) de Caldara e Iacoviello.
+#
+# QuadClass CAMEO:
+#   1 = Cooperación verbal   -> memoria corta  (declaraciones, discursos)
+#   2 = Cooperación material -> memoria normal (acuerdos, ayuda económica)
+#   3 = Conflicto verbal     -> memoria larga  (amenazas, sanciones)
+#   4 = Conflicto material   -> memoria muy larga (ataques, guerras)
+#
+# Ratio > 1 = decae más rápido (memoria más corta).
+# Ratio < 1 = decae más lento (memoria más larga).
+# AJUSTAR: valores iniciales razonables; pueden explorarse experimentalmente.
+LAMBDA_MULTIPLICADORES_QUADCLASS: dict = {
+    "1": 1.5,   # cooperación verbal   -> vida media ≈ 6.7 días
+    "2": 1.0,   # cooperación material -> vida media ≈ 10 días (base)
+    "3": 0.7,   # conflicto verbal     -> vida media ≈ 14.3 días
+    "4": 0.4,   # conflicto material   -> vida media ≈ 25 días
+}
 
 # Ventana máxima de eventos pasados a considerar (en días).
 # Eventos más antiguos se descartan porque su contribución ya es despreciable.
