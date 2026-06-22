@@ -44,6 +44,10 @@ class DatasetGrafoDiario:
         vix: serie del VIX (opcional).
         precomputar: si True, construye todos los grafos en memoria al inicio.
             Útil para datasets pequeños; con muchos días puede ser pesado.
+        participacion: agregación de participación a nivel de nodo (salida de
+            `agregar_participacion_por_dia_y_pais`), que incluye los eventos de
+            un solo actor del filtro OR. Si se omite, las features de nodo se
+            derivan de `eventos_agregados` y NO incluyen esos eventos.
     """
 
     def __init__(
@@ -54,12 +58,14 @@ class DatasetGrafoDiario:
         macro: Optional[pd.DataFrame] = None,
         vix: Optional[pd.Series] = None,
         precomputar: bool = False,
+        participacion: Optional[pd.DataFrame] = None,
     ) -> None:
         self.eventos_agregados = eventos_agregados
         self.etiquetas = etiquetas.reset_index(drop=True)
         self.precios_sp500 = precios_sp500
         self.macro = macro
         self.vix = vix
+        self.participacion = participacion
 
         # Caché en memoria, vacía o pre-llenada.
         self._cache: dict[int, HeteroData] = {}
@@ -78,6 +84,7 @@ class DatasetGrafoDiario:
             self.precios_sp500,
             self.macro,
             self.vix,
+            participacion=self.participacion,
         )
 
     def __len__(self) -> int:

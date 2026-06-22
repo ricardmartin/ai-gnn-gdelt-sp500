@@ -65,15 +65,46 @@ DIM_FEATURES_EDGE_CC = 3 + NUM_QUADCLASS
 DIM_FEATURES_EDGE_CM = 1
 
 
+def _aristas_a_participacion(eventos_agregados: pd.DataFrame) -> pd.DataFrame:
+    """
+    Fallback de compatibilidad: deriva una tabla de participación a nivel de
+    nodo a partir de la agregación de ARISTAS.
+
+    ATENCIÓN: esta vía NO incluye los eventos de un solo actor (porque la
+    agregación de aristas ya los ha descartado). Solo se usa cuando no se
+    dispone de la participación propia. Para cumplir el filtro OR del §4.1 hay
+    que pasar la salida de `agregar_participacion_por_dia_y_pais`.
+    """
+    if eventos_agregados is None or eventos_agregados.empty:
+        return pd.DataFrame()
+    cols = ["fecha", "pais", "rol", "quadclass",
+            "n_eventos", "goldstein_medio", "tono_medio", "num_mentions_total"]
+    bloques = []
+    for col_actor, rol in (("pais_origen", "origen"), ("pais_destino", "destino")):
+        sub = eventos_agregados.dropna(subset=[col_actor]).copy()
+        if sub.empty:
+            continue
+        sub = sub.rename(columns={col_actor: "pais"})
+        sub["rol"] = rol
+        bloques.append(sub[cols])
+    if not bloques:
+        return pd.DataFrame()
+    return pd.concat(bloques, ignore_index=True)
+
+
 def calcular_features_countries(
-    eventos_agregados: pd.DataFrame,
+    participacion: pd.DataFrame,
     fecha_corte: pd.Timestamp,
 ) -> np.ndarray:
     """
     Calcula la matriz de features de los nodos `country` para un día concreto.
 
     Args:
-        eventos_agregados: salida de `agregar_eventos_por_dia_y_par`.
+        participacion: salida de `agregar_participacion_por_dia_y_pais`, con
+            columnas [fecha, pais, rol, quadclass, n_eventos, goldstein_medio,
+            tono_medio, num_mentions_total]. rol ∈ {"origen", "destino"}.
+            Incluye eventos de un solo actor (filtro OR), de modo que un evento
+            CHN→SYR contribuye a las features de CHN aunque no genere arista.
         fecha_corte: día t para el que se computa el grafo.
 
     Returns:
@@ -85,28 +116,35 @@ def calcular_features_countries(
     for pais in ROSTER:
         feats[PAIS_A_INDICE[pais.id], 4] = peso_comercio(pais.id)
 
-    if eventos_agregados.empty:
+    if participacion is None or participacion.empty:
         return feats
 
     fecha_corte = pd.Timestamp(fecha_corte).normalize()
     fecha_min = fecha_corte - pd.Timedelta(days=VENTANA_DECAY_DIAS)
-    df = eventos_agregados[
-        (eventos_agregados["fecha"] <= fecha_corte) &
-        (eventos_agregados["fecha"] >= fecha_min)
+    df = participacion[
+        (participacion["fecha"] <= fecha_corte) &
+        (participacion["fecha"] >= fecha_min)
     ]
     if df.empty:
         return feats
 
-    # Distancia temporal -> factor de decay (mismo que para aristas).
+    # Distancia temporal -> factor de decay.
+    # NOTA: las features de nodo usan el λ GLOBAL, mientras que las aristas usan
+    # el λ por QuadClass (ver decay.py). Unificar ambos es una decisión de
+    # modelado pendiente; por ahora se mantiene el comportamiento global aquí.
     dt = (fecha_corte - df["fecha"]).dt.days.astype(float).values
     decay_factor = np.exp(-LAMBDA_DECAY * dt)
 
     df = df.assign(_w=decay_factor)
 
-    # Agregamos por país (considerando que un país participa tanto como
-    # origen como destino). Sumamos las contribuciones ponderadas.
-    for rol_col, signo in (("pais_origen", "salida"), ("pais_destino", "entrada")):
-        sub = df.groupby(rol_col, observed=True).apply(
+    # Agregamos por país y rol. Un país participa como "origen" (salida) y/o
+    # como "destino" (entrada); ambos contribuyen a sus features.
+    cols_w = ["tono_medio", "goldstein_medio", "n_eventos", "num_mentions_total", "_w"]
+    for rol, signo in (("origen", "salida"), ("destino", "entrada")):
+        sub_rol = df[df["rol"] == rol]
+        if sub_rol.empty:
+            continue
+        agg = sub_rol.groupby("pais", observed=True)[cols_w].apply(
             lambda g: pd.Series({
                 "tono_w": float((g["tono_medio"] * g["_w"]).sum()),
                 "gold_w": float((g["goldstein_medio"] * g["_w"]).sum()),
@@ -116,12 +154,12 @@ def calcular_features_countries(
             })
         )
 
-        for pais_id, fila in sub.iterrows():
+        for pais_id, fila in agg.iterrows():
             idx = PAIS_A_INDICE.get(pais_id)
             if idx is None:
                 continue
             sw = max(fila["suma_w"], 1e-9)
-            # Acumulamos (suma de entrada y salida, normalizada).
+            # Acumulamos (entrada y salida, promediadas por el /2).
             feats[idx, 0] += float(fila["tono_w"] / sw) / 2.0      # tono_medio
             feats[idx, 1] += float(fila["gold_w"] / sw) / 2.0      # goldstein_medio
             feats[idx, 2] += np.log1p(fila["n_w"]) / 2.0           # n_eventos_log
@@ -132,17 +170,17 @@ def calcular_features_countries(
             else:
                 feats[idx, 6] = np.log1p(fila["n_w"])              # grado salida
 
-    # Fracciones por QuadClass.
+    # Fracciones por QuadClass. La columna `pais` ya recoge ambos roles, así que
+    # un único groupby por país suma la participación entrante y saliente.
     for q in range(1, NUM_QUADCLASS + 1):
         sub_q = df[df["quadclass"] == str(q)]
         if sub_q.empty:
             continue
-        for rol_col in ("pais_origen", "pais_destino"):
-            agg = sub_q.groupby(rol_col, observed=True)["_w"].sum()
-            for pais_id, w in agg.items():
-                idx = PAIS_A_INDICE.get(pais_id)
-                if idx is not None:
-                    feats[idx, 6 + q] += float(w)
+        agg = sub_q.groupby("pais", observed=True)["_w"].sum()
+        for pais_id, w in agg.items():
+            idx = PAIS_A_INDICE.get(pais_id)
+            if idx is not None:
+                feats[idx, 6 + q] += float(w)
 
     # Normalizar fracciones de QuadClass por país.
     suma_q = feats[:, 7:7 + NUM_QUADCLASS].sum(axis=1, keepdims=True)
@@ -279,9 +317,22 @@ def construir_grafo_dia(
     precios_sp500: pd.DataFrame,
     macro: Optional[pd.DataFrame] = None,
     vix: Optional[pd.Series] = None,
+    participacion: Optional[pd.DataFrame] = None,
 ) -> HeteroData:
     """
     Construye un grafo heterogéneo HeteroData para una fecha concreta.
+
+    Args:
+        eventos_agregados: agregación de ARISTAS (ambos extremos en roster),
+            salida de `agregar_eventos_por_dia_y_par`. Se usa para las aristas
+            país-país.
+        fecha_corte: día t.
+        precios_sp500 / macro / vix: datos financieros del nodo market.
+        participacion: agregación de PARTICIPACIÓN a nivel de nodo, salida de
+            `agregar_participacion_por_dia_y_pais`. Incluye eventos de un solo
+            actor (filtro OR) y se usa para las features de los nodos país. Si
+            es None, se deriva de `eventos_agregados` como fallback (sin eventos
+            de un solo actor).
 
     Devuelve un HeteroData con:
         data['country'].x       -> (NUM_PAISES, DIM_FEATURES_COUNTRY)
@@ -293,8 +344,11 @@ def construir_grafo_dia(
     """
     data = HeteroData()
 
-    # Nodos country.
-    x_country = calcular_features_countries(eventos_agregados, fecha_corte)
+    # Nodos country. Si no se pasa participación, se deriva de las aristas
+    # (fallback de compatibilidad: NO incluiría eventos de un solo actor).
+    if participacion is None:
+        participacion = _aristas_a_participacion(eventos_agregados)
+    x_country = calcular_features_countries(participacion, fecha_corte)
     data["country"].x = torch.tensor(x_country, dtype=torch.float32)
 
     # Nodo market.

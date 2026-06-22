@@ -149,12 +149,12 @@ def agregar_eventos_por_dia_y_par(df_eventos: pd.DataFrame) -> pd.DataFrame:
     "arista resumen" entre dos países en un día concreto, con sus atributos
     agregados.
 
-    Tras el cambio a filtro OR, pais_origen o pais_destino pueden ser NaN
-    cuando solo uno de los actores está en el roster. En ese caso el evento
-    contribuye a las features del nodo conocido pero no genera una arista
-    país-país (se necesitan los dos extremos para eso). Estas filas se
-    descartan de la agregación de aristas pero se conservan para el cálculo
-    de features de nodo en grafo.py.
+    IMPORTANTE: esta función produce ÚNICAMENTE las ARISTAS país-país, para las
+    que se necesitan los dos extremos en el roster. Los eventos de un solo actor
+    (uno de pais_origen/pais_destino es NaN tras el filtro OR) NO generan arista
+    y se descartan aquí. Esos eventos SÍ deben alimentar las features del nodo
+    conocido; de eso se encarga `agregar_participacion_por_dia_y_pais`, que es
+    la función que consume `calcular_features_countries` en grafo.py.
 
     Devuelve un DataFrame con columnas:
         fecha, pais_origen, pais_destino, quadclass,
@@ -178,6 +178,70 @@ def agregar_eventos_por_dia_y_par(df_eventos: pd.DataFrame) -> pd.DataFrame:
     )
 
     agregado = grupos.agg(
+        n_eventos=("GLOBALEVENTID", "size"),
+        goldstein_medio=("GoldsteinScale", "mean"),
+        tono_medio=("AvgTone", "mean"),
+        num_mentions_total=("NumMentions", "sum"),
+    ).reset_index()
+
+    return agregado
+
+
+def agregar_participacion_por_dia_y_pais(df_eventos: pd.DataFrame) -> pd.DataFrame:
+    """
+    Agrega los eventos a nivel (fecha, pais, rol, QuadClass) para las FEATURES
+    DE NODO.
+
+    A diferencia de `agregar_eventos_por_dia_y_par` (que solo conserva eventos
+    con ambos extremos en el roster, porque construye aristas), aquí se cuenta
+    la PARTICIPACIÓN de cada país en eventos, incluyendo los eventos en los que
+    solo uno de los actores pertenece al roster (filtro OR del §4.1 del TFM).
+
+    Cada evento se "despliega" en una o dos filas de participación según cuántos
+    de sus actores estén en el roster:
+        - CHN→SYR  -> una fila: (CHN, rol="origen")        [SYR no está]
+        - SYR→CHN  -> una fila: (CHN, rol="destino")       [SYR no está]
+        - USA→CHN  -> dos filas: (USA, "origen"), (CHN, "destino")
+
+    De este modo un evento del tipo CHN→SYR, que no genera arista, sí contribuye
+    a las features del nodo CHN, que es justo lo que el filtro OR pretende
+    capturar y lo que el §4.3.2 describe como "el número de eventos en que
+    participa" cada país.
+
+    Devuelve un DataFrame con columnas:
+        fecha, pais, rol, quadclass,
+        n_eventos, goldstein_medio, tono_medio, num_mentions_total
+    donde rol ∈ {"origen", "destino"}.
+    """
+    if df_eventos.empty:
+        return pd.DataFrame()
+
+    df = df_eventos.copy()
+    df["quadclass"] = df["QuadClass"].astype(str)
+
+    cols_evento = [
+        "fecha", "pais", "rol", "quadclass",
+        "GLOBALEVENTID", "GoldsteinScale", "AvgTone", "NumMentions",
+    ]
+
+    bloques: list[pd.DataFrame] = []
+    for col_actor, rol in (("pais_origen", "origen"), ("pais_destino", "destino")):
+        sub = df.dropna(subset=[col_actor]).copy()
+        if sub.empty:
+            continue
+        sub = sub.rename(columns={col_actor: "pais"})
+        sub["rol"] = rol
+        bloques.append(sub[cols_evento])
+
+    if not bloques:
+        return pd.DataFrame()
+
+    participacion = pd.concat(bloques, ignore_index=True)
+
+    agregado = participacion.groupby(
+        ["fecha", "pais", "rol", "quadclass"],
+        observed=True,
+    ).agg(
         n_eventos=("GLOBALEVENTID", "size"),
         goldstein_medio=("GoldsteinScale", "mean"),
         tono_medio=("AvgTone", "mean"),
