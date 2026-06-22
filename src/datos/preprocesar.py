@@ -43,12 +43,18 @@ def cargar_csv_gdelt(ruta: Path) -> pd.DataFrame:
     El fichero no tiene cabecera y está separado por tabuladores. La mayoría
     de columnas se mantienen como string para preservar códigos CAMEO y FIPS
     (que son numéricos en apariencia pero deben tratarse como categóricos).
+
+    Se leen del disco ÚNICAMENTE las columnas relevantes (usecols), en lugar de
+    cargar las 58 como texto y recortar después. Esto reduce el consumo de RAM
+    por fichero ~4-5x y evita la fragmentación de memoria al procesar miles de
+    ficheros en bucle.
     """
     df = pd.read_csv(
         ruta,
         sep="\t",
         header=None,
         names=list(COLUMNAS_GDELT_1_0),
+        usecols=list(COLUMNAS_RELEVANTES),
         dtype=str,
         na_values=[""],
         keep_default_na=False,
@@ -127,11 +133,16 @@ def preprocesar_rango(rutas: list[Path]) -> pd.DataFrame:
     Preprocesa una lista de CSVs y devuelve un único DataFrame concatenado.
     """
     dfs: list[pd.DataFrame] = []
-    for ruta in rutas:
+    for i, ruta in enumerate(rutas):
         try:
             dfs.append(preprocesar_dia(ruta))
         except Exception as e:
             log.warning("Fallo procesando %s: %s", ruta.name, e)
+        # Liberación periódica para que glibc devuelva memoria al sistema y no
+        # se acumule fragmentación al procesar miles de ficheros.
+        if (i + 1) % 200 == 0:
+            import gc
+            gc.collect()
 
     if not dfs:
         return pd.DataFrame()
