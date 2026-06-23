@@ -11,7 +11,7 @@ a partir del análisis exploratorio.
 
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Tuple
+from typing import Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -200,20 +200,32 @@ ENTRENAMIENTO = ConfigEntrenamiento()
 
 @dataclass
 class ConfigWalkForward:
-    """Hiperparámetros del esquema de validación temporal."""
-    # Número de folds (particiones).
+    """Hiperparámetros del esquema de validación temporal.
+
+    IMPORTANTE: las ventanas se miden en MUESTRAS (sesiones bursátiles), no en
+    días de calendario. Cada muestra del dataset es un día de mercado alineado
+    con GDELT, así que medir en muestras da folds parejos y evita que el
+    experimento se confine a una franja inicial del rango.
+    """
+    # Número de folds (bloques de validación).
     num_folds: int = 5
 
     # Modo de ventana:
-    #   "expansiva" -> el set de train crece en cada fold
+    #   "expansiva"  -> el set de train crece en cada fold
     #   "deslizante" -> ventana de train de tamaño fijo
     modo: str = "expansiva"
 
-    # Tamaño mínimo (en días) del primer set de train.
-    train_inicial_dias: int = 365 * 2
+    # Tamaño del set de validación de cada fold, en MUESTRAS.
+    # None -> se deriva para cubrir todo el rango: el periodo se parte en
+    #         (num_folds + 1) bloques iguales (estilo TimeSeriesSplit expansivo).
+    tam_val_muestras: Optional[int] = None
 
-    # Tamaño del set de validación dentro de cada fold (en días).
-    validacion_dias: int = 90
+    # Tamaño del primer set de train, en MUESTRAS. None -> se deriva igual.
+    train_inicial_muestras: Optional[int] = None
+
+    # Hueco (en muestras) entre el fin del train y el inicio de la validación,
+    # para evitar leakage temporal en el borde. 0 = sin hueco.
+    embargo: int = 0
 
 
 WALK_FORWARD = ConfigWalkForward()
