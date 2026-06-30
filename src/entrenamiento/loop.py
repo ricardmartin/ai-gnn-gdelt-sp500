@@ -216,7 +216,7 @@ def entrenar_un_fold(
     if retornos_val is not None and len(retornos_val) == len(reales):
         metricas_fin = simular_estrategia(probas, retornos_val, umbral_short)
 
-    return m_final, historial, metricas_fin
+    return m_final, historial, metricas_fin, probas, reales
 
 
 def entrenar_walkforward(
@@ -258,7 +258,7 @@ def entrenar_walkforward(
 
         for seed in semillas:
             log.info("--- Semilla %d ---", seed)
-            m, _hist, mf = entrenar_un_fold(
+            m, _hist, mf, probas_sf, reales_sf = entrenar_un_fold(
                 dataset, fold.idx_train, fold.idx_val,
                 seed=seed, dispositivo=dispositivo, verbose=False,
                 retornos_val=retornos_val_fold,
@@ -268,6 +268,16 @@ def entrenar_walkforward(
             if mf is not None:
                 log.info("  Financiero:    %s", mf.resumen())
             resultado.agregar(m, mf)
+            # Crudos para análisis posterior (por fold y semilla)
+            if not hasattr(resultado, "probas_crudas"):
+                resultado.probas_crudas = []
+                resultado.reales_crudas = []
+                resultado.retornos_crudos = []
+            resultado.probas_crudas.append(probas_sf)
+            resultado.reales_crudas.append(reales_sf)
+            resultado.retornos_crudos.append(
+                retornos_val_fold if retornos_val_fold is not None else None
+            )
 
     log.info("=" * 70)
     log.info("RESUMEN GLOBAL: %s", resultado.resumen_final())
