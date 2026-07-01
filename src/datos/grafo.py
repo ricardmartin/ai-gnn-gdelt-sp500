@@ -7,9 +7,10 @@ Para cada día t se construye un grafo con:
     'country' : los ~20 países del roster
     'market'  : un único nodo correspondiente al S&P 500
 
-- **Dos tipos de aristas:**
+- **Tres tipos de aristas:**
     ('country', 'interactua', 'country')  : interacciones GDELT con decay
-    ('country', 'expone', 'market')       : aristas estructurales
+    ('country', 'expone', 'market')       : exposición estructural país -> mercado
+    ('market', 'influye', 'country')       : retroalimentación mercado -> país
 
 El tipado de las aristas país-país (por QuadClass) se mantiene como atributo
 de arista, no como tipo separado en el grafo heterogéneo, para no multiplicar
@@ -311,6 +312,37 @@ def construir_aristas_cm() -> tuple[torch.Tensor, torch.Tensor]:
     return edge_index, torch.tensor(pesos, dtype=torch.float32)
 
 
+def construir_aristas_mc() -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Construye las aristas market → country (inversas de las country → market).
+
+    Son las aristas que permiten que el estado del mercado retroalimente a los
+    nodos país en el message passing. Sin ellas, la GNN procesa la geopolítica
+    sin "ver" nunca el mercado y el cruce entre modalidades es unidireccional
+    (equivalente a late fusion); con ellas se obtiene la integración profunda
+    que describe el §4.2.2 del TFM: en la 2ª capa cada país codifica su
+    "situación geopolítica dada la sensibilidad actual del mercado".
+
+    El peso de exposición (comercio bilateral) es el mismo que en la arista
+    directa: la exposición estructural entre un país y el mercado es simétrica.
+
+    Returns:
+        edge_index: tensor de shape (2, NUM_PAISES). Fila 0 = 0 (único nodo
+                    market, origen), fila 1 = índice de país (destino).
+        edge_attr:  tensor de shape (NUM_PAISES, 1) con el peso de comercio.
+    """
+    indices = np.arange(NUM_PAISES, dtype=np.int64)
+    edge_index = torch.tensor(
+        np.vstack([np.zeros(NUM_PAISES, dtype=np.int64), indices]),
+        dtype=torch.long,
+    )
+    pesos = np.array(
+        [peso_comercio(p.id) for p in ROSTER],
+        dtype=np.float32,
+    ).reshape(-1, 1)
+    return edge_index, torch.tensor(pesos, dtype=torch.float32)
+
+
 def construir_grafo_dia(
     eventos_agregados: pd.DataFrame,
     fecha_corte: pd.Timestamp,
@@ -337,10 +369,9 @@ def construir_grafo_dia(
     Devuelve un HeteroData con:
         data['country'].x       -> (NUM_PAISES, DIM_FEATURES_COUNTRY)
         data['market'].x        -> (1, DIM_FEATURES_MARKET)
-        data['country', 'interactua', 'country'].edge_index
-        data['country', 'interactua', 'country'].edge_attr
-        data['country', 'expone', 'market'].edge_index
-        data['country', 'expone', 'market'].edge_attr
+        data['country', 'interactua', 'country'].edge_index / .edge_attr
+        data['country', 'expone', 'market'].edge_index / .edge_attr
+        data['market', 'influye', 'country'].edge_index / .edge_attr
     """
     data = HeteroData()
 
@@ -364,5 +395,12 @@ def construir_grafo_dia(
     ei_cm, ea_cm = construir_aristas_cm()
     data["country", "expone", "market"].edge_index = ei_cm
     data["country", "expone", "market"].edge_attr = ea_cm
+
+    # Aristas market -> country (inversas): permiten que el estado del mercado
+    # retroalimente a los países en el message passing (cruce bidireccional,
+    # §4.2.2). Sin ellas el cruce sería unidireccional (late fusion encubierto).
+    ei_mc, ea_mc = construir_aristas_mc()
+    data["market", "influye", "country"].edge_index = ei_mc
+    data["market", "influye", "country"].edge_attr = ea_mc
 
     return data

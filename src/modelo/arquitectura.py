@@ -6,9 +6,13 @@ Implementa el modelo descrito en el TFM:
 1. Capa de proyección inicial: lleva las features de cada tipo de nodo
    (country y market) a un espacio de representación común.
 
-2. Capas heterogéneas de message passing con atención (GATv2 vía HeteroConv).
-   En cada capa, cada nodo agrega información de sus vecinos ponderando con
-   atención específica por tipo de arista.
+2. Capas heterogéneas de message passing con atención (GATv2 vía HeteroConv),
+   con conexión RESIDUAL. En cada capa, cada nodo agrega información de sus
+   vecinos ponderando con atención específica por tipo de arista, y se suma esa
+   agregación a su representación previa (residual) para conservar siempre sus
+   features propias. El grafo incluye la arista inversa market->country, de modo
+   que el estado del mercado retroalimenta a los países (cruce bidireccional,
+   §4.2.2) en lugar de un flujo unidireccional tipo late fusion.
 
 3. Cabeza de predicción: extrae el embedding final del nodo `market`, le aplica
    una capa lineal y devuelve los logits de las tres clases (baja/neutro/sube).
@@ -61,6 +65,15 @@ class HGNNGeopolitica(nn.Module):
         self.num_capas = num_capas
         self.dropout = dropout
 
+        # La conexión residual (x + conv(x)) exige que la salida de cada capa
+        # conserve la dimensión de entrada. Con GATv2 concatenando cabezas eso
+        # significa out_channels * num_cabezas == dim_oculta.
+        if dim_oculta % num_cabezas != 0:
+            raise ValueError(
+                f"dim_oculta ({dim_oculta}) debe ser divisible por num_cabezas "
+                f"({num_cabezas}) para que el residual cuadre en dimensión."
+            )
+
         # --- Proyección inicial por tipo de nodo ---------------------------------
         # Cada tipo de nodo tiene dimensión distinta; los llevamos a `dim_oculta`.
         self.proj_country = Linear(DIM_FEATURES_COUNTRY, dim_oculta)
@@ -69,7 +82,9 @@ class HGNNGeopolitica(nn.Module):
         # --- Capas heterogéneas de message passing -------------------------------
         # Para cada tipo de arista se define una operación GATv2 distinta.
         # HeteroConv aplica cada una al subgrafo del tipo correspondiente y suma
-        # los mensajes por nodo.
+        # los mensajes por nodo. El nodo country es destino de DOS relaciones
+        # (interactua y influye), cuyos mensajes se suman: así cada país recibe
+        # a la vez su contexto geopolítico y el estado del mercado.
         self.capas = nn.ModuleList()
         for _ in range(num_capas):
             conv = HeteroConv(
@@ -84,6 +99,14 @@ class HGNNGeopolitica(nn.Module):
                     ),
                     ("country", "expone", "market"): GATv2Conv(
                         in_channels=(dim_oculta, dim_oculta),  # (origen, destino)
+                        out_channels=dim_oculta // num_cabezas,
+                        heads=num_cabezas,
+                        dropout=dropout,
+                        edge_dim=DIM_FEATURES_EDGE_CM,
+                        add_self_loops=False,
+                    ),
+                    ("market", "influye", "country"): GATv2Conv(
+                        in_channels=(dim_oculta, dim_oculta),  # (mercado, país)
                         out_channels=dim_oculta // num_cabezas,
                         heads=num_cabezas,
                         dropout=dropout,
@@ -126,6 +149,8 @@ class HGNNGeopolitica(nn.Module):
                 data["country", "interactua", "country"].edge_index,
             ("country", "expone", "market"):
                 data["country", "expone", "market"].edge_index,
+            ("market", "influye", "country"):
+                data["market", "influye", "country"].edge_index,
         }
 
         edge_attr_dict = {
@@ -133,14 +158,29 @@ class HGNNGeopolitica(nn.Module):
                 data["country", "interactua", "country"].edge_attr,
             ("country", "expone", "market"):
                 data["country", "expone", "market"].edge_attr,
+            ("market", "influye", "country"):
+                data["market", "influye", "country"].edge_attr,
         }
 
-        # --- Message passing ----------------------------------------------------
+        # --- Message passing con conexión residual ------------------------------
+        # Residual (x + conv(x)) para que cada nodo conserve SIEMPRE sus propias
+        # features tras la agregación. Sin esto, al no haber self-loops, un nodo
+        # sin aristas ese día (o el nodo market, que solo recibe de países)
+        # perdería su información propia y la salida sería solo la de sus vecinos
+        # (ver §4.3.4). HeteroConv solo devuelve los tipos de nodo que han
+        # recibido algún mensaje; para los que no, se conserva su estado previo.
         for capa in self.capas:
-            x_dict = capa(x_dict, edge_index_dict, edge_attr_dict=edge_attr_dict)
-            x_dict = {tipo: F.relu(x) for tipo, x in x_dict.items()}
-            x_dict = {tipo: F.dropout(x, p=self.dropout, training=self.training)
-                      for tipo, x in x_dict.items()}
+            x_out = capa(x_dict, edge_index_dict, edge_attr_dict=edge_attr_dict)
+            x_nuevo = {}
+            for tipo, x_prev in x_dict.items():
+                h = x_out.get(tipo)
+                if h is None:
+                    x_nuevo[tipo] = x_prev
+                    continue
+                h = F.relu(h)
+                h = F.dropout(h, p=self.dropout, training=self.training)
+                x_nuevo[tipo] = x_prev + h  # residual
+            x_dict = x_nuevo
 
         # --- Cabeza de predicción desde el nodo market --------------------------
         x_market = x_dict["market"]
