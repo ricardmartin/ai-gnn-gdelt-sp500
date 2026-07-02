@@ -186,6 +186,17 @@ class ConfigEntrenamiento:
     # Función de pérdida
     usar_pesos_clase: bool = True   # ponderar cross-entropy si hay desbalance
 
+    # Validación INTERNA para early stopping (anti-leakage de selección de
+    # modelo): dentro de cada fold, el tramo final del train se reserva como
+    # validación interna. El early stopping se decide SOLO con ella; el bloque
+    # de test del fold se evalúa UNA única vez al final, sin haberlo mirado.
+    fraccion_val_interna: float = 0.15  # fracción final del train reservada
+    min_val_interna: int = 20           # mínimo de muestras en la val interna
+
+    # Normalización de features (media 0, desviación 1) con estadísticas
+    # calculadas SOLO sobre el train interno de cada fold (anti-leakage).
+    normalizar_features: bool = True
+
     # Reproducibilidad: lista de semillas a usar.
     # Cada semilla produce un experimento independiente; se reporta media y dispersión.
     semillas: Tuple[int, ...] = (0, 1, 2)

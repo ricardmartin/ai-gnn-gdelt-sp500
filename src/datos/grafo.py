@@ -240,6 +240,14 @@ def calcular_features_market(
         m = macro.loc[:fecha_corte]
         if not m.empty:
             fila = m.iloc[-1]
+            # Feature 6 (log_dxy): se rellena solo si el DataFrame macro trae
+            # una columna 'dxy' (índice del dólar). Si no existe, queda a 0 y
+            # la normalización por fold la neutraliza (columna constante -> 0),
+            # de modo que no introduce ruido.
+            if "dxy" in m.columns and not pd.isna(fila.get("dxy")):
+                dxy_val = float(fila["dxy"])
+                if dxy_val > 0:
+                    feats[0, 6] = float(np.log(dxy_val))
             if "fed_funds" in m.columns and not pd.isna(fila.get("fed_funds")):
                 feats[0, 7] = float(fila["fed_funds"])
             if "treasury_10y" in m.columns and not pd.isna(fila.get("treasury_10y")):

@@ -105,9 +105,11 @@ def entrenar_logistica(X_train: np.ndarray, y_train: np.ndarray):
     from sklearn.preprocessing import StandardScaler
     from sklearn.pipeline import Pipeline
 
+    # NOTA: no pasar `multi_class`: el parámetro fue eliminado en
+    # scikit-learn >= 1.7 (el comportamiento multinomial es ya el único).
     pipe = Pipeline([
         ("scaler", StandardScaler()),
-        ("lr", LogisticRegression(max_iter=1000, multi_class="auto")),
+        ("lr", LogisticRegression(max_iter=1000)),
     ])
     pipe.fit(X_train, y_train)
     return pipe
