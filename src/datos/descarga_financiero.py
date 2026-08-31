@@ -1,4 +1,4 @@
-"""
+de"""
 Descarga de datos financieros: S&P 500 y variables macroeconómicas.
 
 - S&P 500: precios diarios (yfinance, ticker ^GSPC).

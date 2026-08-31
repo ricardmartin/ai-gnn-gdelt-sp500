@@ -32,7 +32,12 @@ from dataclasses import dataclass, field
 import numpy as np
 import torch
 
-from config import UMBRAL_SHORT, TASA_LIBRE_RIESGO_ANUAL
+from config import (
+    COSTE_SHORT_ANUAL_BPS,
+    COSTE_TRANSACCION_BPS,
+    TASA_LIBRE_RIESGO_ANUAL,
+    UMBRAL_SHORT,
+)
 
 
 def _a_numpy(x) -> np.ndarray:
@@ -62,6 +67,31 @@ class Metricas:
             f"F1_clases={self.f1_por_clase.round(3).tolist()} | "
             f"n={self.n_muestras}"
         )
+
+
+@dataclass(frozen=True)
+class RegistroOOS:
+    """Predicciones OOS de una ejecución identificadas sin perder la fecha."""
+
+    fold_id: int
+    seed: int
+    indices: np.ndarray
+    fechas: np.ndarray
+    probabilidades: np.ndarray
+    reales: np.ndarray
+    retornos: np.ndarray | None
+
+    def __post_init__(self) -> None:
+        n = len(self.indices)
+        if self.probabilidades.shape != (n, 3):
+            raise ValueError(
+                "probabilidades debe tener shape "
+                f"({n}, 3), recibió {self.probabilidades.shape}"
+            )
+        if len(self.fechas) != n or len(self.reales) != n:
+            raise ValueError("indices, fechas y reales deben tener la misma longitud")
+        if self.retornos is not None and len(self.retornos) != n:
+            raise ValueError("retornos debe tener la misma longitud que indices")
 
 
 def calcular_metricas(y_true, y_pred, num_clases: int = 3) -> Metricas:
@@ -113,6 +143,9 @@ class MetricasFinancieras:
     dias_long: int
     dias_short: int
     dias_cash: int
+    n_cambios_posicion: int
+    coste_transaccion_total: float
+    coste_short_total: float
     # Curvas para graficar
     curva_estrategia: np.ndarray     # capital normalizado a 1.0 al inicio
     curva_buy_hold: np.ndarray
@@ -126,7 +159,9 @@ class MetricasFinancieras:
             f"vs_BH={100 * self.rentabilidad_vs_bh:+.2f}pp | "
             f"sharpe={self.sharpe_estrategia:.2f} | "
             f"maxDD={100 * self.max_drawdown_estrategia:.2f}% | "
-            f"long/short/cash={self.dias_long}/{self.dias_short}/{self.dias_cash}"
+            f"long/short/cash={self.dias_long}/{self.dias_short}/{self.dias_cash} | "
+            f"cambios={self.n_cambios_posicion} | "
+            f"costes={100 * (self.coste_transaccion_total + self.coste_short_total):.2f}%"
         )
 
 
@@ -134,6 +169,8 @@ def _calcular_posiciones(
     clases_predichas: np.ndarray,
     proba_baja: np.ndarray,
     umbral_short: float = UMBRAL_SHORT,
+    proba_sube: np.ndarray | None = None,
+    umbral_long: float | None = None,
 ) -> np.ndarray:
     """
     Convierte predicciones en posiciones diarias siguiendo la lógica de la estrategia.
@@ -142,19 +179,25 @@ def _calcular_posiciones(
         clases_predichas: array de enteros {0,1,2} con la clase del día.
         proba_baja: probabilidad P(clase=baja) del modelo para cada día.
         umbral_short: umbral mínimo para activar short.
+        proba_sube: probabilidad P(clase=sube), necesaria si hay umbral long.
+        umbral_long: confianza mínima para abrir long. None conserva la política
+            histórica: toda predicción argmax "sube" abre long.
 
     Returns:
         Array de int con la posición de cada día: 1=long, 0=cash, -1=short.
         La posición se "arrastra" cuando el modelo predice neutro.
     """
     n = len(clases_predichas)
+    if umbral_long is not None and proba_sube is None:
+        raise ValueError("proba_sube es obligatoria cuando se usa umbral_long")
     pos = np.zeros(n, dtype=np.int8)
     posicion_actual = 0  # arrancamos sin nada
 
     for i in range(n):
         c = int(clases_predichas[i])
         if c == CLASE_SUBE:
-            posicion_actual = 1
+            if umbral_long is None or proba_sube[i] >= umbral_long:
+                posicion_actual = 1
         elif c == CLASE_BAJA:
             # Sale del SP500. Si la confianza es alta, además se pone corto.
             if proba_baja[i] >= umbral_short:
@@ -205,6 +248,9 @@ def simular_estrategia(
     probabilidades: np.ndarray,
     retornos_reales: np.ndarray,
     umbral_short: float = UMBRAL_SHORT,
+    umbral_long: float | None = None,
+    coste_transaccion_bps: float = COSTE_TRANSACCION_BPS,
+    coste_short_anual_bps: float = COSTE_SHORT_ANUAL_BPS,
 ) -> MetricasFinancieras:
     """
     Simula la estrategia y compara con buy & hold.
@@ -213,6 +259,9 @@ def simular_estrategia(
         probabilidades: array de shape (n, 3) con [P(baja), P(neutro), P(sube)] por día.
         retornos_reales: array de shape (n,) con el retorno real de cada día (close-to-close).
         umbral_short: umbral mínimo de P(baja) para activar short.
+        umbral_long: confianza mínima para abrir long; None usa argmax sin filtro.
+        coste_transaccion_bps: coste por unidad de cambio de posición.
+        coste_short_anual_bps: coste anualizado de mantener la posición short.
 
     Returns:
         MetricasFinancieras con todos los resultados.
@@ -229,6 +278,17 @@ def simular_estrategia(
             f"Longitudes incompatibles: probas={len(probabilidades)} "
             f"retornos={len(retornos_reales)}"
         )
+    for nombre, valor in (
+        ("umbral_short", umbral_short),
+        ("coste_transaccion_bps", coste_transaccion_bps),
+        ("coste_short_anual_bps", coste_short_anual_bps),
+    ):
+        if float(valor) < 0:
+            raise ValueError(f"{nombre} no puede ser negativo")
+    if umbral_long is not None and not (0.0 <= float(umbral_long) <= 1.0):
+        raise ValueError("umbral_long debe estar entre 0 y 1")
+    if not (0.0 <= float(umbral_short) <= 1.0):
+        raise ValueError("umbral_short debe estar entre 0 y 1")
 
     n = len(retornos_reales)
     if n == 0:
@@ -239,6 +299,8 @@ def simular_estrategia(
             sharpe_estrategia=0.0, sharpe_buy_hold=0.0,
             max_drawdown_estrategia=0.0, max_drawdown_buy_hold=0.0,
             n_dias=0, dias_long=0, dias_short=0, dias_cash=0,
+            n_cambios_posicion=0,
+            coste_transaccion_total=0.0, coste_short_total=0.0,
             curva_estrategia=np.array([1.0]),
             curva_buy_hold=np.array([1.0]),
             posiciones=np.array([], dtype=np.int8),
@@ -247,13 +309,28 @@ def simular_estrategia(
     # Decisiones diarias.
     clases_predichas = probabilidades.argmax(axis=1)
     proba_baja = probabilidades[:, CLASE_BAJA]
-    posiciones = _calcular_posiciones(clases_predichas, proba_baja, umbral_short)
+    proba_sube = probabilidades[:, CLASE_SUBE]
+    posiciones = _calcular_posiciones(
+        clases_predichas,
+        proba_baja,
+        umbral_short,
+        proba_sube=proba_sube,
+        umbral_long=umbral_long,
+    )
 
     # Retornos diarios de la estrategia: posición × retorno real del día.
     # Si pos=1 (long): replica el SP500.
     # Si pos=0 (cash): retorno cero.
     # Si pos=-1 (short): retorno opuesto al SP500.
-    retornos_estrategia = posiciones.astype(float) * retornos_reales
+    retornos_brutos = posiciones.astype(float) * retornos_reales
+    posiciones_previas = np.concatenate(([0], posiciones[:-1]))
+    rotacion = np.abs(posiciones.astype(float) - posiciones_previas.astype(float))
+    costes_transaccion = rotacion * (float(coste_transaccion_bps) / 10_000.0)
+    costes_short = (
+        (posiciones == -1).astype(float)
+        * (float(coste_short_anual_bps) / 10_000.0 / 252.0)
+    )
+    retornos_estrategia = retornos_brutos - costes_transaccion - costes_short
 
     # Curvas de capital (capital normalizado a 1.0 al inicio).
     curva_estrategia = np.cumprod(1.0 + retornos_estrategia)
@@ -275,6 +352,9 @@ def simular_estrategia(
         dias_long=int((posiciones == 1).sum()),
         dias_short=int((posiciones == -1).sum()),
         dias_cash=int((posiciones == 0).sum()),
+        n_cambios_posicion=int((rotacion > 0).sum()),
+        coste_transaccion_total=float(costes_transaccion.sum()),
+        coste_short_total=float(costes_short.sum()),
         curva_estrategia=curva_estrategia,
         curva_buy_hold=curva_buy_hold,
         posiciones=posiciones,
@@ -290,15 +370,110 @@ class ResultadoExperimento:
     """Agrupa métricas (clasificación + financieras) de múltiples folds y seeds."""
     metricas_por_fold: list[Metricas] = field(default_factory=list)
     metricas_financieras_por_fold: list[MetricasFinancieras] = field(default_factory=list)
+    fold_ids_metricas: list[int | None] = field(default_factory=list)
+    semillas_metricas: list[int | None] = field(default_factory=list)
+    registros_oos: list[RegistroOOS] = field(default_factory=list)
 
     def agregar(
         self,
         m: Metricas,
         mf: MetricasFinancieras | None = None,
+        fold_id: int | None = None,
+        seed: int | None = None,
     ) -> None:
         self.metricas_por_fold.append(m)
+        self.fold_ids_metricas.append(fold_id)
+        self.semillas_metricas.append(seed)
         if mf is not None:
             self.metricas_financieras_por_fold.append(mf)
+
+    def agregar_oos(
+        self,
+        fold_id: int,
+        seed: int,
+        indices,
+        fechas,
+        probabilidades,
+        reales,
+        retornos=None,
+    ) -> None:
+        """Añade una ejecución OOS conservando sus claves temporales."""
+        self.registros_oos.append(RegistroOOS(
+            fold_id=int(fold_id),
+            seed=int(seed),
+            indices=np.asarray(indices, dtype=np.int64),
+            fechas=np.asarray(fechas),
+            probabilidades=np.asarray(probabilidades, dtype=float),
+            reales=np.asarray(reales, dtype=np.int64),
+            retornos=None if retornos is None else np.asarray(retornos, dtype=float),
+        ))
+
+    @property
+    def probas_crudas(self) -> list[np.ndarray]:
+        """Compatibilidad: probabilidades por ejecución fold-semilla."""
+        return [r.probabilidades for r in self.registros_oos]
+
+    @property
+    def reales_crudas(self) -> list[np.ndarray]:
+        """Compatibilidad: etiquetas por ejecución fold-semilla."""
+        return [r.reales for r in self.registros_oos]
+
+    @property
+    def retornos_crudos(self) -> list[np.ndarray | None]:
+        """Compatibilidad: retornos por ejecución fold-semilla."""
+        return [r.retornos for r in self.registros_oos]
+
+    def tabla_oos(self, promediar_semillas: bool = True):
+        """
+        Devuelve predicciones OOS ordenadas y auditables.
+
+        Con `promediar_semillas=True`, cada fecha aparece una sola vez y sus
+        probabilidades son el ensemble medio de las semillas. Esa es la tabla
+        que debe alimentar calibración, métricas globales y backtests.
+        """
+        import pandas as pd
+
+        if not self.registros_oos:
+            return pd.DataFrame(columns=[
+                "fold_id", "seed", "indice", "fecha", "y_true", "retorno",
+                "p_baja", "p_neutro", "p_sube",
+            ])
+
+        bloques = []
+        for r in self.registros_oos:
+            bloques.append(pd.DataFrame({
+                "fold_id": r.fold_id,
+                "seed": r.seed,
+                "indice": r.indices,
+                "fecha": pd.to_datetime(r.fechas),
+                "y_true": r.reales,
+                "retorno": np.nan if r.retornos is None else r.retornos,
+                "p_baja": r.probabilidades[:, 0],
+                "p_neutro": r.probabilidades[:, 1],
+                "p_sube": r.probabilidades[:, 2],
+            }))
+
+        tabla = pd.concat(bloques, ignore_index=True)
+        claves = ["fold_id", "indice", "fecha"]
+        if not promediar_semillas:
+            return tabla.sort_values(["fecha", "seed"]).reset_index(drop=True)
+
+        consistencia = tabla.groupby(claves, observed=True).agg(
+            n_y=("y_true", "nunique"),
+            n_r=("retorno", lambda s: s.dropna().nunique()),
+        )
+        if (consistencia["n_y"] > 1).any() or (consistencia["n_r"] > 1).any():
+            raise ValueError("Etiquetas o retornos inconsistentes entre semillas")
+
+        ensemble = tabla.groupby(claves, as_index=False, observed=True).agg(
+            y_true=("y_true", "first"),
+            retorno=("retorno", "first"),
+            p_baja=("p_baja", "mean"),
+            p_neutro=("p_neutro", "mean"),
+            p_sube=("p_sube", "mean"),
+            n_semillas=("seed", "nunique"),
+        )
+        return ensemble.sort_values("fecha").reset_index(drop=True)
 
     def media_y_std(self) -> dict[str, tuple[float, float]]:
         """Devuelve media y desviación típica de las métricas principales."""
@@ -355,4 +530,9 @@ class ResultadoExperimento:
                 f"± {100*ms['max_drawdown'][1]:.2f}%"
             )
 
-        return f"folds={len(self.metricas_por_fold)} | " + " | ".join(partes)
+        folds_validos = {x for x in self.fold_ids_metricas if x is not None}
+        n_folds = len(folds_validos) if folds_validos else len(self.metricas_por_fold)
+        return (
+            f"folds={n_folds} | ejecuciones={len(self.metricas_por_fold)} | "
+            + " | ".join(partes)
+        )

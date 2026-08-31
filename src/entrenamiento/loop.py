@@ -412,6 +412,11 @@ def entrenar_walkforward(
         retornos_val_fold = None
         if retornos_por_indice is not None:
             retornos_val_fold = np.asarray(retornos_por_indice, dtype=float)[fold.idx_val]
+        if hasattr(dataset, "etiquetas") and "fecha_target" in dataset.etiquetas:
+            fechas_val_fold = dataset.etiquetas.iloc[fold.idx_val]["fecha_target"].values
+        else:
+            # Fallback auditable para datasets sintéticos sin tabla de fechas.
+            fechas_val_fold = np.asarray(fold.idx_val)
 
         for seed in semillas:
             log.info("--- Semilla %d ---", seed)
@@ -424,15 +429,16 @@ def entrenar_walkforward(
             log.info("  Clasificación: %s", m.resumen())
             if mf is not None:
                 log.info("  Financiero:    %s", mf.resumen())
-            resultado.agregar(m, mf)
-            # Crudos para análisis posterior (por fold y semilla)
-            if not hasattr(resultado, "probas_crudas"):
-                resultado.probas_crudas = []
-                resultado.reales_crudas = []
-                resultado.retornos_crudos = []
-            resultado.probas_crudas.append(probas_sf)
-            resultado.reales_crudas.append(reales_sf)
-            resultado.retornos_crudos.append(retornos_val_fold)
+            resultado.agregar(m, mf, fold_id=fold.fold_id, seed=seed)
+            resultado.agregar_oos(
+                fold_id=fold.fold_id,
+                seed=seed,
+                indices=fold.idx_val,
+                fechas=fechas_val_fold,
+                probabilidades=probas_sf,
+                reales=reales_sf,
+                retornos=retornos_val_fold,
+            )
 
     log.info("=" * 70)
     log.info("RESUMEN GLOBAL: %s", resultado.resumen_final())

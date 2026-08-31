@@ -42,9 +42,14 @@ for d in (DIR_RAW, DIR_PROCESSED, DIR_CHECKPOINTS):
 FECHA_INICIO = "2015-01-01"
 FECHA_FIN = "2025-12-31"
 
-# Corte horario para evitar leakage: hora UTC de cierre del mercado NY.
-# Eventos GDELT con timestamp posterior se asignan al día siguiente.
-HORA_CIERRE_NY_UTC = 21  # 21:00 UTC ≈ 16:00 NY (cierre regular)
+# Corte horario para evitar leakage. Se define en hora local de Nueva York para
+# que el cambio DST (20:00/21:00 UTC según la fecha) se aplique correctamente.
+ZONA_HORARIA_MERCADO = "America/New_York"
+HORA_CIERRE_MERCADO_LOCAL = 16
+
+# Compatibilidad con notebooks antiguos. El preprocesado nuevo no usa este
+# valor fijo porque introduciría una hora de leakage durante el horario de verano.
+HORA_CIERRE_NY_UTC = 21
 
 
 # ---------------------------------------------------------------------------
@@ -53,14 +58,22 @@ HORA_CIERRE_NY_UTC = 21  # 21:00 UTC ≈ 16:00 NY (cierre regular)
 
 # Modo de discretización del retorno diario en {baja, neutro, sube}.
 # Opciones:
-#   "fijo"     -> usar UMBRAL_NEUTRO fijo (p.ej. ±0.5 %).
-#   "sigma"    -> usar ±UMBRAL_SIGMA * desviación típica histórica.
-#   "terciles" -> dividir los retornos en terciles (clases balanceadas por diseño).
-MODO_ETIQUETA = "terciles"
+#   "fijo"       -> usar UMBRAL_NEUTRO fijo (p.ej. ±0.5 %).
+#   "sigma"      -> usar ±UMBRAL_SIGMA * desviación típica histórica.
+#   "terciles"   -> dividir los retornos en terciles (clases balanceadas por diseño).
+#   "asimetrico" -> cuantiles configurables (baja=q_inf_pct, sube=q_sup_pct).
+#                   Útil en mercados alcistas donde terciles infravaloran subidas.
+MODO_ETIQUETA = "asimetrico"
 
 # AJUSTAR: cuando se conozca la distribución real de retornos.
 UMBRAL_NEUTRO = 0.005  # 0.5 %, solo usado si MODO_ETIQUETA="fijo"
 UMBRAL_SIGMA = 0.5     # solo usado si MODO_ETIQUETA="sigma"
+
+# Percentiles para modo "asimetrico" (rango 0-1).
+# Ejemplo: (0.20, 0.80) -> baja=peor 20%, sube=mejor 20%, neutro=60% central.
+# Fuerza al modelo a apostar solo cuando la señal es fuerte.
+UMBRAL_Q_INF = 0.20
+UMBRAL_Q_SUP = 0.80
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +90,12 @@ UMBRAL_SIGMA = 0.5     # solo usado si MODO_ETIQUETA="sigma"
 # tiene más riesgo y conviene exigir certeza alta. El resto de la lógica se
 # decide únicamente por la clase predicha (argmax).
 UMBRAL_SHORT = 0.70
+
+# Costes conservadores del backtest. Se aplican por unidad de rotación: pasar
+# de long a short cuenta como dos operaciones. El coste short se anualiza sobre
+# los días en los que la posición es -1.
+COSTE_TRANSACCION_BPS = 5.0
+COSTE_SHORT_ANUAL_BPS = 100.0
 
 # Tasa libre de riesgo anual usada para calcular el Sharpe ratio.
 # 0.0 significa que toda la rentabilidad cuenta como exceso. Valores típicos:

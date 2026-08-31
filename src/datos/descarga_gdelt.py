@@ -18,6 +18,7 @@ import os
 import urllib.request
 import urllib.error
 import zipfile
+from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -28,6 +29,64 @@ log = obtener_logger(__name__)
 
 # URL base del repositorio público de GDELT 1.0 Events (formato diario).
 _BASE_URL_DIARIO = "http://data.gdeltproject.org/events"
+
+
+@dataclass(frozen=True)
+class CoberturaGDELT:
+    """Resultado auditable de la cobertura diaria disponible en disco."""
+
+    fecha_inicio: date
+    fecha_fin: date
+    rutas: tuple[Path, ...]
+    faltantes: tuple[date, ...]
+    vacios: tuple[date, ...]
+
+    @property
+    def completa(self) -> bool:
+        return not self.faltantes and not self.vacios
+
+    @property
+    def dias_esperados(self) -> int:
+        return (self.fecha_fin - self.fecha_inicio).days + 1
+
+    def resumen(self) -> str:
+        return (
+            f"{len(self.rutas)}/{self.dias_esperados} días válidos | "
+            f"faltantes={len(self.faltantes)} | vacíos={len(self.vacios)}"
+        )
+
+
+def auditar_cobertura_local(
+    fecha_inicio: date,
+    fecha_fin: date,
+    directorio: Path | str | None = None,
+) -> CoberturaGDELT:
+    """Comprueba cada fecha esperada; no usa heurísticas por número de archivos."""
+    if fecha_fin < fecha_inicio:
+        raise ValueError("fecha_fin debe ser ≥ fecha_inicio")
+
+    directorio = Path(directorio) if directorio is not None else DIR_RAW
+    rutas: list[Path] = []
+    faltantes: list[date] = []
+    vacios: list[date] = []
+    fecha = fecha_inicio
+    while fecha <= fecha_fin:
+        ruta = directorio / f"{fecha:%Y%m%d}.export.CSV"
+        if not ruta.exists():
+            faltantes.append(fecha)
+        elif ruta.stat().st_size == 0:
+            vacios.append(fecha)
+        else:
+            rutas.append(ruta)
+        fecha += timedelta(days=1)
+
+    return CoberturaGDELT(
+        fecha_inicio=fecha_inicio,
+        fecha_fin=fecha_fin,
+        rutas=tuple(rutas),
+        faltantes=tuple(faltantes),
+        vacios=tuple(vacios),
+    )
 
 
 def _ruta_destino(fecha: date) -> Path:
@@ -82,11 +141,15 @@ def descargar_rango(
     fecha_inicio: date,
     fecha_fin: date,
     sobrescribir: bool = False,
+    exigir_completo: bool = False,
 ) -> list[Path]:
     """
     Descarga todos los días entre `fecha_inicio` y `fecha_fin` (ambas incluidas).
 
-    Si un día no existe en el servidor, lo omite y continúa.
+    Si un día no existe en el servidor, lo omite y continúa. Con
+    `exigir_completo=True`, los 404 confirmados también se consideran una
+    ausencia explicada; solo se falla por huecos no confirmados o archivos
+    locales vacíos.
 
     Returns:
         Lista de rutas a los CSVs descargados (omitiendo los que faltan).
@@ -95,6 +158,7 @@ def descargar_rango(
         raise ValueError("fecha_fin debe ser ≥ fecha_inicio")
 
     rutas: list[Path] = []
+    no_disponibles_404: list[date] = []
     n_dias = (fecha_fin - fecha_inicio).days + 1
     log.info("Descargando GDELT desde %s hasta %s (%d días)",
              fecha_inicio, fecha_fin, n_dias)
@@ -104,10 +168,33 @@ def descargar_rango(
         ruta = descargar_dia(fecha, sobrescribir=sobrescribir)
         if ruta is not None:
             rutas.append(ruta)
+        else:
+            # descargar_dia solo devuelve None cuando el servidor responde 404.
+            no_disponibles_404.append(fecha)
         fecha += timedelta(days=1)
 
-    log.info("Descarga completada: %d/%d días disponibles", len(rutas), n_dias)
-    return rutas
+    cobertura = auditar_cobertura_local(fecha_inicio, fecha_fin)
+    log.info("Descarga completada: %s", cobertura.resumen())
+    confirmados_404 = set(no_disponibles_404)
+    faltantes_no_confirmados = [
+        fecha for fecha in cobertura.faltantes if fecha not in confirmados_404
+    ]
+    if exigir_completo and (faltantes_no_confirmados or cobertura.vacios):
+        muestra = [
+            f.isoformat()
+            for f in (*faltantes_no_confirmados, *cobertura.vacios)[:10]
+        ]
+        raise RuntimeError(
+            "Cobertura GDELT con huecos no explicados tras la descarga: "
+            f"{cobertura.resumen()} | muestra={muestra}"
+        )
+    if cobertura.faltantes:
+        log.warning(
+            "Se continúa con %d días ausentes confirmados como 404; "
+            "las ventanas afectadas deben excluirse del experimento.",
+            len(cobertura.faltantes),
+        )
+    return list(cobertura.rutas)
 
 
 # Esquema oficial de GDELT 1.0 Events (58 columnas, sin cabecera).
