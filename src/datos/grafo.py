@@ -140,7 +140,19 @@ def calcular_features_countries(
 
     # Agregamos por país y rol. Un país participa como "origen" (salida) y/o
     # como "destino" (entrada); ambos contribuyen a sus features.
+    #
+    # Bugfix: antes se dividía siempre entre 2 asumiendo que todo país tenía
+    # ambos roles. Países con rol único (p.ej. PRK, IRN aparecen a menudo solo
+    # como destino) veían su tono/goldstein subestimados a la mitad de forma
+    # sistemática. Ahora se acumulan las contribuciones ponderadas de ambos
+    # roles y se promedia dividiendo por el peso total (sw_total), lo que da
+    # el promedio ponderado real independientemente de cuántos roles haya.
     cols_w = ["tono_medio", "goldstein_medio", "n_eventos", "num_mentions_total", "_w"]
+
+    # Acumuladores por país: (tono_w_total, gold_w_total, n_w_total,
+    # mentions_w_total, sw_total). Se combinan origen + destino antes de dividir.
+    acumul = np.zeros((NUM_PAISES, 5), dtype=np.float64)
+
     for rol, signo in (("origen", "salida"), ("destino", "entrada")):
         sub_rol = df[df["rol"] == rol]
         if sub_rol.empty:
@@ -159,17 +171,28 @@ def calcular_features_countries(
             idx = PAIS_A_INDICE.get(pais_id)
             if idx is None:
                 continue
-            sw = max(fila["suma_w"], 1e-9)
-            # Acumulamos (entrada y salida, promediadas por el /2).
-            feats[idx, 0] += float(fila["tono_w"] / sw) / 2.0      # tono_medio
-            feats[idx, 1] += float(fila["gold_w"] / sw) / 2.0      # goldstein_medio
-            feats[idx, 2] += np.log1p(fila["n_w"]) / 2.0           # n_eventos_log
-            feats[idx, 3] += np.log1p(fila["mentions_w"]) / 2.0    # mentions_log
+            acumul[idx, 0] += fila["tono_w"]
+            acumul[idx, 1] += fila["gold_w"]
+            acumul[idx, 2] += fila["n_w"]
+            acumul[idx, 3] += fila["mentions_w"]
+            acumul[idx, 4] += fila["suma_w"]
 
+            # Grados dirigidos: entrada y salida son features separadas y NO se
+            # promedian entre sí (cada una mide algo distinto).
             if signo == "entrada":
                 feats[idx, 5] = np.log1p(fila["n_w"])              # grado entrada
             else:
                 feats[idx, 6] = np.log1p(fila["n_w"])              # grado salida
+
+    # Promedios ponderados finales (independientes del número de roles activos).
+    for idx in range(NUM_PAISES):
+        sw = acumul[idx, 4]
+        if sw <= 0:
+            continue
+        feats[idx, 0] = float(acumul[idx, 0] / sw)                 # tono_medio
+        feats[idx, 1] = float(acumul[idx, 1] / sw)                 # goldstein_medio
+        feats[idx, 2] = float(np.log1p(acumul[idx, 2]))            # n_eventos_log
+        feats[idx, 3] = float(np.log1p(acumul[idx, 3]))            # mentions_log
 
     # Fracciones por QuadClass. La columna `pais` ya recoge ambos roles, así que
     # un único groupby por país suma la participación entrante y saliente.

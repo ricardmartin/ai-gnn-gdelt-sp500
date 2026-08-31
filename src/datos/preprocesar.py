@@ -118,14 +118,30 @@ def preprocesar_dia(ruta: Path) -> pd.DataFrame:
     """
     Pipeline de preprocesado para un CSV diario de GDELT.
 
-    Aplica en orden: carga, filtro por roster, filtro por cobertura.
-    Devuelve un DataFrame de eventos relevantes.
+    Aplica en orden: carga, filtro por roster, filtro por cobertura,
+    corte horario anti-leakage. Devuelve un DataFrame de eventos relevantes
+    con la columna `fecha` reasignada según `HORA_CIERRE_NY_UTC` (eventos
+    publicados tras el cierre de NY se reasignan al día siguiente).
     """
+    from src.datos.etiquetas import aplicar_corte_horario
+
     df = cargar_csv_gdelt(ruta)
     df = filtrar_roster(df)
     df = filtrar_cobertura(df)
     df = df.dropna(subset=["GoldsteinScale", "AvgTone", "QuadClass"]).reset_index(drop=True)
-    return df
+
+    if df.empty:
+        return df
+
+    # Bugfix anti-leakage: eventos con DATEADDED > cierre NY se asignan al día
+    # siguiente. Antes el pipeline usaba SQLDATE directo, lo que metía en el
+    # grafo del día t eventos publicados después del cierre de mercado ese día
+    # (información no disponible en el momento real de la predicción t+1).
+    df_reasignado = aplicar_corte_horario(df)
+    if "fecha_grafo" in df_reasignado.columns:
+        df_reasignado["fecha"] = df_reasignado["fecha_grafo"]
+        df_reasignado = df_reasignado.drop(columns=["fecha_grafo"])
+    return df_reasignado
 
 
 def preprocesar_rango(rutas: list[Path]) -> pd.DataFrame:

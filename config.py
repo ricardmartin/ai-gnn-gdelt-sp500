@@ -40,7 +40,7 @@ for d in (DIR_RAW, DIR_PROCESSED, DIR_CHECKPOINTS):
 
 # AJUSTAR: rango de fechas final tras decidir el periodo de entrenamiento.
 FECHA_INICIO = "2015-01-01"
-FECHA_FIN = "2025-01-01"
+FECHA_FIN = "2025-12-31"
 
 # Corte horario para evitar leakage: hora UTC de cierre del mercado NY.
 # Eventos GDELT con timestamp posterior se asignan al día siguiente.
@@ -56,7 +56,7 @@ HORA_CIERRE_NY_UTC = 21  # 21:00 UTC ≈ 16:00 NY (cierre regular)
 #   "fijo"     -> usar UMBRAL_NEUTRO fijo (p.ej. ±0.5 %).
 #   "sigma"    -> usar ±UMBRAL_SIGMA * desviación típica histórica.
 #   "terciles" -> dividir los retornos en terciles (clases balanceadas por diseño).
-MODO_ETIQUETA = "sigma"
+MODO_ETIQUETA = "terciles"
 
 # AJUSTAR: cuando se conozca la distribución real de retornos.
 UMBRAL_NEUTRO = 0.005  # 0.5 %, solo usado si MODO_ETIQUETA="fijo"
@@ -184,7 +184,7 @@ class ConfigEntrenamiento:
     paciencia_early_stopping: int = 15
 
     # Función de pérdida
-    usar_pesos_clase: bool = True   # ponderar cross-entropy si hay desbalance
+    usar_pesos_clase: bool = False  # con terciles las clases ya están balanceadas
 
     # Validación INTERNA para early stopping (anti-leakage de selección de
     # modelo): dentro de cada fold, el tramo final del train se reserva como
@@ -219,7 +219,7 @@ class ConfigWalkForward:
     experimento se confine a una franja inicial del rango.
     """
     # Número de folds (bloques de validación).
-    num_folds: int = 5
+    num_folds: int = 10
 
     # Modo de ventana:
     #   "expansiva"  -> el set de train crece en cada fold
