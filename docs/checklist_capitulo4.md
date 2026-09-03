@@ -2,7 +2,7 @@
 
 Lista accionable de [revision_capitulo4.md](revision_capitulo4.md). El texto ya redactado está en [parches_cap4.md](parches_cap4.md). Los identificadores coinciden: si algo no se entiende, el detalle completo con la frase literal está allí.
 
-**Quedan 17 tareas.** Las resueltas se han retirado; el historial está en git y el detalle de cada hallazgo en la revisión enlazada arriba.
+**Quedan 18 tareas.** Las resueltas se han retirado; el historial está en git y el detalle de cada hallazgo en la revisión enlazada arriba.
 
 🔴 error de hecho · 🟠 tiempo verbal · 🟡 mejora · ⚪ forma
 
@@ -79,6 +79,7 @@ Ya no quedan citas huérfanas: las cuatro de §2.2.3 se resolvieron con el capí
 - [ ] Distribución por **EventRootCode** sobre el dataset filtrado. §4.2.5 afirma que las 20 categorías de EventRootCode «fragmentarían el volumen hasta dejar sin masa apreciable a las de cola», pero no lo demuestra con cifras. Se calcula igual que la tabla de QuadClass: agrupar el dataset filtrado por EventRootCode y contar eventos y aristas
 - [ ] Gráfico de **eventos por año**. Respalda visualmente el párrafo de §2.1.3 sobre el máximo de 2016 (≈2,9 M) y la caída a 1,4 M en 2025. Se obtiene contando filas por año sobre `data/raw/*.export.CSV`
 - [ ] Gráfico de **top 10 pares origen-destino** (USA→USA es el 24 % del total). Es la validación cuantitativa del grafo que promete OE2, junto con la distribución de grados y la de QuadClass
+- [ ] **Diagrama del grafo heterogéneo** para insertar al final de §4.3.2, antes de §4.3.3. Esquema con los dos tipos de nodo (país del roster · S&P 500), los dos tipos de arista (país↔país generadas por eventos GDELT · mercado↔país) y las características asociadas a cada elemento (nodo país: agregados de tono/Goldstein/NumMentions; nodo S&P 500: retorno, VIX, DXY, macro; arista: peso con refuerzo y decaimiento por QuadClass). Es el segundo diagrama del capítulo
 
 ---
 
